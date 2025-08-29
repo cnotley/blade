@@ -69,7 +69,8 @@ public class RouteMethodHandler implements RequestHandler {
         context.initRoute(route);
 
         // execution middleware
-        if (routeMatcher.middlewareCount() > 0 && !invokeMiddleware(routeMatcher.getMiddleware(), context)) {
+        List<RouteMatcher.Middleware> mds = routeMatcher.getMiddleware(context);
+        if (!mds.isEmpty() && !invokeMiddleware(mds, context)) {
             return;
         }
         context.injectParameters();
@@ -335,14 +336,19 @@ public class RouteMethodHandler implements RequestHandler {
         return true;
     }
 
-    private boolean invokeMiddleware(List<Route> middleware, RouteContext context) throws BladeException {
+    private boolean invokeMiddleware(List<RouteMatcher.Middleware> middleware, RouteContext context) throws BladeException {
         if (BladeKit.isEmpty(middleware)) {
             return true;
         }
-        for (Route route : middleware) {
-            WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
-            boolean flag = webHook.before(context);
-            if (!flag) return false;
+        for (RouteMatcher.Middleware m : middleware) {
+            try {
+                boolean flag = m.getHook().before(context);
+                if (!flag) {
+                    return false;
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: {}", e.getMessage());
+            }
         }
         return true;
     }
