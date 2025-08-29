@@ -4,6 +4,7 @@ import com.hellokaton.blade.ioc.annotation.Order;
 import com.hellokaton.blade.kit.*;
 import com.hellokaton.blade.mvc.RouteContext;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
+import com.hellokaton.blade.mvc.hook.Options;
 import com.hellokaton.blade.mvc.hook.WebHook;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.route.mapping.dynamic.TrieMapping;
@@ -17,6 +18,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static com.hellokaton.blade.kit.BladeKit.logAddRoute;
@@ -36,7 +38,8 @@ public class RouteMatcher {
     // Storage URL and route
     private final Map<String, Route> routes = new HashMap<>(16);
     private final Map<String, List<Route>> hooks = new HashMap<>(8);
-    private List<Route> middleware = null;
+    private List<Middleware> middleware = null;
+    private final java.util.concurrent.atomic.AtomicInteger middlewareSeq = new java.util.concurrent.atomic.AtomicInteger();
     private final Map<String, Method[]> classMethodPool = new ConcurrentHashMap<>();
     private final Map<Class<?>, Object> controllerPool = new ConcurrentHashMap<>(8);
 
@@ -185,8 +188,35 @@ public class RouteMatcher {
         return afters;
     }
 
-    public List<Route> getMiddleware() {
-        return this.middleware;
+    public List<Route> getMiddleware(RouteContext context) {
+        if (BladeKit.isEmpty(this.middleware)) {
+            return Collections.emptyList();
+        }
+        String path = normalizePath(context.uri());
+        String method = context.method().toUpperCase(Locale.ENGLISH);
+
+        List<Middleware> matched = new ArrayList<>();
+        for (Middleware m : this.middleware) {
+            try {
+                if (m.matches(path, method, context)) {
+                    matched.add(m);
+                }
+            } catch (Exception e) {
+                log.warn("[Selective Middleware] match error", e);
+            }
+        }
+
+        if (matched.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        matched.sort(Comparator.comparingInt(Middleware::priority).thenComparingInt(Middleware::order));
+
+        List<Route> routes = new ArrayList<>(matched.size());
+        for (Middleware m : matched) {
+            routes.add(m.route);
+        }
+        return routes;
     }
 
     public int middlewareCount() {
@@ -283,13 +313,191 @@ public class RouteMatcher {
         }
     }
 
-    public void addMiddleware(WebHook webHook) {
+    public void addMiddleware(WebHook webHook, Options options) {
         if (null == this.middleware) {
-            this.middleware = new ArrayList<>(8);
+            this.middleware = new java.util.concurrent.CopyOnWriteArrayList<>();
         }
+        if (options == null) {
+            options = new Options();
+        }
+        if (options.getIncludes().isEmpty()) {
+            options.addInclude("/");
+        }
+
         Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
-        Route route = new Route(HttpMethod.BEFORE, "/**", webHook, WebHook.class, method, null);
-        this.middleware.add(route);
+        Route route = new Route(HttpMethod.BEFORE, "/**", webHook, webHook.getClass(), method, null);
+
+        Middleware m = new Middleware(route, options, middlewareSeq.getAndIncrement());
+
+        for (Middleware existing : this.middleware) {
+            if (existing.isDuplicate(m)) {
+                return;
+            }
+        }
+
+        this.middleware.add(m);
+    }
+
+    private static String normalizePath(String path) {
+        if (path == null) {
+            return "/";
+        }
+        int q = path.indexOf('?');
+        if (q >= 0) {
+            path = path.substring(0, q);
+        }
+        int f = path.indexOf('#');
+        if (f >= 0) {
+            path = path.substring(0, f);
+        }
+        try {
+            path = java.net.URLDecoder.decode(path, java.nio.charset.StandardCharsets.UTF_8.name());
+        } catch (Exception ignored) {
+        }
+        path = PathKit.cleanPath(path);
+        if (path.length() > 1 && path.endsWith("/")) {
+            path = path.substring(0, path.length() - 1);
+        }
+        if (path.isEmpty()) {
+            path = "/";
+        }
+        return path.toLowerCase(Locale.ENGLISH);
+    }
+
+    private static Pattern compile(String pattern) {
+        String norm = normalizePattern(pattern);
+        StringBuilder sb = new StringBuilder();
+        boolean escape = false;
+        for (int i = 0; i < norm.length(); i++) {
+            char c = norm.charAt(i);
+            if (escape) {
+                sb.append(Pattern.quote(String.valueOf(c)));
+                escape = false;
+                continue;
+            }
+            if (c == '\\') {
+                if (i == norm.length() - 1) {
+                    sb.append(Pattern.quote("\\"));
+                    log.warn("[Selective Middleware] Malformed pattern: {}", pattern);
+                } else {
+                    escape = true;
+                }
+            } else if (c == '*') {
+                sb.append(".*");
+            } else if (c == '?') {
+                sb.append("[^/]");
+            } else {
+                if (".+()^$|{}[]".indexOf(c) >= 0) {
+                    sb.append('\\');
+                }
+                sb.append(c);
+            }
+        }
+        String regex = sb.toString();
+        if ("/".equals(norm)) {
+            regex = ".*";
+        }
+        return Pattern.compile("^" + regex + "$", Pattern.CASE_INSENSITIVE);
+    }
+
+    private static String normalizePattern(String pattern) {
+        if (pattern == null || pattern.isEmpty()) {
+            return "/";
+        }
+        try {
+            pattern = java.net.URLDecoder.decode(pattern, java.nio.charset.StandardCharsets.UTF_8.name());
+        } catch (Exception ignored) {
+        }
+        pattern = PathKit.cleanPath(pattern);
+        if (pattern.length() > 1 && pattern.endsWith("/")) {
+            pattern = pattern.substring(0, pattern.length() - 1);
+        }
+        if (pattern.isEmpty()) {
+            pattern = "/";
+        }
+        return pattern.toLowerCase(Locale.ENGLISH);
+    }
+
+    private static class Middleware {
+        final Route route;
+        final List<Pattern> includes;
+        final List<Pattern> excludes;
+        final Set<String> methods;
+        final int priority;
+        final Predicate<RouteContext> condition;
+        final Set<String> includeRaw;
+        final Set<String> excludeRaw;
+        final Set<String> methodRaw;
+        final int order;
+
+        Middleware(Route route, Options options, int order) {
+            this.route = route;
+            this.order = order;
+            this.priority = options.getPriority();
+            this.condition = options.getCondition();
+
+            this.includes = new ArrayList<>();
+            this.excludes = new ArrayList<>();
+            this.includeRaw = new LinkedHashSet<>();
+            this.excludeRaw = new LinkedHashSet<>();
+            this.methodRaw = new LinkedHashSet<>();
+
+            for (String inc : options.getIncludes()) {
+                String norm = normalizePattern(inc);
+                includeRaw.add(norm);
+                includes.add(compile(norm));
+            }
+            for (String exc : options.getExcludes()) {
+                String norm = normalizePattern(exc);
+                excludeRaw.add(norm);
+                excludes.add(compile(norm));
+            }
+            if (options.getMethods().isEmpty()) {
+                this.methods = Collections.emptySet();
+            } else {
+                this.methods = new HashSet<>(options.getMethods());
+                this.methodRaw.addAll(this.methods);
+            }
+        }
+
+        boolean matches(String path, String method, RouteContext ctx) {
+            boolean include = false;
+            for (Pattern p : includes) {
+                if (p.matcher(path).matches()) {
+                    include = true;
+                    break;
+                }
+            }
+            if (!include) {
+                return false;
+            }
+            for (Pattern p : excludes) {
+                if (p.matcher(path).matches()) {
+                    return false;
+                }
+            }
+            if (!methods.isEmpty() && !methods.contains(method)) {
+                return false;
+            }
+            try {
+                return condition.test(ctx);
+            } catch (Exception e) {
+                log.warn("[Selective Middleware] condition error", e);
+                return false;
+            }
+        }
+
+        int priority() { return priority; }
+        int order() { return order; }
+
+        boolean isDuplicate(Middleware other) {
+            return route.getTarget() == other.route.getTarget()
+                    && priority == other.priority
+                    && condition == other.condition
+                    && includeRaw.equals(other.includeRaw)
+                    && excludeRaw.equals(other.excludeRaw)
+                    && methodRaw.equals(other.methodRaw);
+        }
     }
 
 }

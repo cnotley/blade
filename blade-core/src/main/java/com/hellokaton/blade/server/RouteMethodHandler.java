@@ -69,8 +69,11 @@ public class RouteMethodHandler implements RequestHandler {
         context.initRoute(route);
 
         // execution middleware
-        if (routeMatcher.middlewareCount() > 0 && !invokeMiddleware(routeMatcher.getMiddleware(), context)) {
-            return;
+        if (routeMatcher.middlewareCount() > 0) {
+            List<Route> middleware = routeMatcher.getMiddleware(context);
+            if (!BladeKit.isEmpty(middleware) && !invokeMiddleware(middleware, context)) {
+                return;
+            }
         }
         context.injectParameters();
 
