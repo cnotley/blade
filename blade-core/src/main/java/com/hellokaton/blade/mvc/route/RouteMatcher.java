@@ -5,16 +5,18 @@ import com.hellokaton.blade.kit.*;
 import com.hellokaton.blade.mvc.RouteContext;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
+import com.hellokaton.blade.mvc.hook.WebHookWrapper;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.route.mapping.dynamic.TrieMapping;
 import com.hellokaton.blade.mvc.ui.ResponseType;
 import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Method;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -36,7 +38,8 @@ public class RouteMatcher {
     // Storage URL and route
     private final Map<String, Route> routes = new HashMap<>(16);
     private final Map<String, List<Route>> hooks = new HashMap<>(8);
-    private List<Route> middleware = null;
+    private final List<WebHookWrapper> middleware = new CopyOnWriteArrayList<>();
+    private final AtomicInteger middlewareOrder = new AtomicInteger();
     private final Map<String, Method[]> classMethodPool = new ConcurrentHashMap<>();
     private final Map<Class<?>, Object> controllerPool = new ConcurrentHashMap<>(8);
 
@@ -185,14 +188,34 @@ public class RouteMatcher {
         return afters;
     }
 
+    public List<WebHookWrapper> getMiddleware(RouteContext ctx) {
+        return middleware.stream()
+                .filter(wrapper -> {
+                    try {
+                        return wrapper.matches(ctx);
+                    } catch (Exception e) {
+                        log.warn("SelectiveMiddleware: {}", e.getMessage());
+                        return false;
+                    }
+                })
+                .sorted(WebHookWrapper.ORDERING)
+                .collect(Collectors.toList());
+    }
+
     public List<Route> getMiddleware() {
-        return this.middleware;
+        List<Route> routes = new ArrayList<>();
+        for (WebHookWrapper wrapper : middleware) {
+            try {
+                Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
+                routes.add(new Route(HttpMethod.BEFORE, "/**", wrapper.getHook(), wrapper.getHook().getClass(), method, null));
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+        return routes;
     }
 
     public int middlewareCount() {
-        if (null == this.middleware) {
-            return 0;
-        }
         return this.middleware.size();
     }
 
@@ -229,13 +252,7 @@ public class RouteMatcher {
      * @return return parsed path
      */
     private String parsePath(String path) {
-        path = PathKit.fixPath(path);
-        try {
-            URI uri = new URI(path);
-            return uri.getPath();
-        } catch (URISyntaxException e) {
-            return path;
-        }
+        return WebHookOptions.normalizePath(path);
     }
 
     /**
@@ -284,12 +301,24 @@ public class RouteMatcher {
     }
 
     public void addMiddleware(WebHook webHook) {
-        if (null == this.middleware) {
-            this.middleware = new ArrayList<>(8);
+        addMiddleware(webHook, new WebHookOptions().addInclude("/**"));
+    }
+
+    public void addMiddleware(WebHook webHook, WebHookOptions options) {
+        WebHookOptions opts = options == null ? new WebHookOptions().addInclude("/**") : options;
+        if (opts.getIncludes().isEmpty()) {
+            opts.addInclude("/**");
         }
-        Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
-        Route route = new Route(HttpMethod.BEFORE, "/**", webHook, WebHook.class, method, null);
-        this.middleware.add(route);
+        int order = middlewareOrder.getAndIncrement();
+        WebHookWrapper wrapper = new WebHookWrapper(webHook, opts, order);
+        synchronized (middleware) {
+            for (WebHookWrapper w : middleware) {
+                if (w.getHook() == webHook && w.getOptions().equals(opts)) {
+                    return; // duplicate
+                }
+            }
+            middleware.add(wrapper);
+        }
     }
 
 }
