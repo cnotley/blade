@@ -15,6 +15,8 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -36,7 +38,8 @@ public class RouteMatcher {
     // Storage URL and route
     private final Map<String, Route> routes = new HashMap<>(16);
     private final Map<String, List<Route>> hooks = new HashMap<>(8);
-    private List<Route> middleware = null;
+    private final List<Middleware> middlewares = new CopyOnWriteArrayList<>();
+    private final AtomicLong middlewareIndex = new AtomicLong();
     private final Map<String, Method[]> classMethodPool = new ConcurrentHashMap<>();
     private final Map<Class<?>, Object> controllerPool = new ConcurrentHashMap<>(8);
 
@@ -153,7 +156,7 @@ public class RouteMatcher {
      * @param path request path
      */
     public List<Route> getBefore(String path) {
-        String cleanPath = parsePath(path);
+        String cleanPath = com.hellokaton.blade.mvc.hook.WebHookOptions.normalizePath(path);
 
         List<Route> collect = hooks.values().stream()
                 .flatMap(Collection::stream)
@@ -186,14 +189,11 @@ public class RouteMatcher {
     }
 
     public List<Route> getMiddleware() {
-        return this.middleware;
+        return Collections.emptyList();
     }
 
     public int middlewareCount() {
-        if (null == this.middleware) {
-            return 0;
-        }
-        return this.middleware.size();
+        return this.middlewares.size();
     }
 
     /**
@@ -209,6 +209,18 @@ public class RouteMatcher {
             }
             return -1;
         });
+    }
+
+    public static class Middleware {
+        final WebHook webHook;
+        final com.hellokaton.blade.mvc.hook.WebHookOptions options;
+        final long order;
+
+        Middleware(WebHook webHook, com.hellokaton.blade.mvc.hook.WebHookOptions options, long order) {
+            this.webHook = webHook;
+            this.options = options;
+            this.order = order;
+        }
     }
 
     /**
@@ -284,12 +296,45 @@ public class RouteMatcher {
     }
 
     public void addMiddleware(WebHook webHook) {
-        if (null == this.middleware) {
-            this.middleware = new ArrayList<>(8);
+        addMiddleware(webHook, new com.hellokaton.blade.mvc.hook.WebHookOptions());
+    }
+
+    public void addMiddleware(WebHook webHook, com.hellokaton.blade.mvc.hook.WebHookOptions options) {
+        if (webHook == null || options == null) {
+            return;
         }
-        Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
-        Route route = new Route(HttpMethod.BEFORE, "/**", webHook, WebHook.class, method, null);
-        this.middleware.add(route);
+        for (Middleware m : middlewares) {
+            if (m.webHook == webHook && options.equals(m.options)) {
+                return;
+            }
+        }
+        middlewares.add(new Middleware(webHook, options, middlewareIndex.getAndIncrement()));
+    }
+
+    public List<Middleware> getMiddleware(RouteContext context) {
+        if (middlewares.isEmpty()) {
+            return Collections.emptyList();
+        }
+        String path = context.uri();
+        HttpMethod method;
+        try {
+            method = HttpMethod.valueOf(context.method().toUpperCase(Locale.ROOT));
+        } catch (Exception e) {
+            method = null;
+        }
+        List<Middleware> matches = new ArrayList<>();
+        for (Middleware m : middlewares) {
+            try {
+                if (m.options.matches(path, method, context)) {
+                    matches.add(m);
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: match error", e);
+            }
+        }
+        matches.sort(Comparator.comparingInt((Middleware m) -> m.options.getPriority())
+                .thenComparingLong(m -> m.order));
+        return matches;
     }
 
 }

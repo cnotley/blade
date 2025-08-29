@@ -11,7 +11,6 @@ import com.hellokaton.blade.mvc.RouteContext;
 import com.hellokaton.blade.mvc.WebContext;
 import com.hellokaton.blade.mvc.handler.RequestHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
-import com.hellokaton.blade.mvc.hook.WebHook;
 import com.hellokaton.blade.mvc.http.Cookie;
 import com.hellokaton.blade.mvc.http.*;
 import com.hellokaton.blade.mvc.route.Route;
@@ -69,7 +68,8 @@ public class RouteMethodHandler implements RequestHandler {
         context.initRoute(route);
 
         // execution middleware
-        if (routeMatcher.middlewareCount() > 0 && !invokeMiddleware(routeMatcher.getMiddleware(), context)) {
+        List<RouteMatcher.Middleware> mws = routeMatcher.getMiddleware(context);
+        if (!mws.isEmpty() && !invokeMiddleware(mws, context)) {
             return;
         }
         context.injectParameters();
@@ -335,14 +335,17 @@ public class RouteMethodHandler implements RequestHandler {
         return true;
     }
 
-    private boolean invokeMiddleware(List<Route> middleware, RouteContext context) throws BladeException {
+    private boolean invokeMiddleware(List<RouteMatcher.Middleware> middleware, RouteContext context) throws BladeException {
         if (BladeKit.isEmpty(middleware)) {
             return true;
         }
-        for (Route route : middleware) {
-            WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
-            boolean flag = webHook.before(context);
-            if (!flag) return false;
+        for (RouteMatcher.Middleware m : middleware) {
+            try {
+                boolean flag = m.webHook.before(context);
+                if (!flag) return false;
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: invoke error", e);
+            }
         }
         return true;
     }
