@@ -11,11 +11,12 @@ import com.hellokaton.blade.mvc.RouteContext;
 import com.hellokaton.blade.mvc.WebContext;
 import com.hellokaton.blade.mvc.handler.RequestHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
-import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.Cookie;
 import com.hellokaton.blade.mvc.http.*;
 import com.hellokaton.blade.mvc.route.Route;
 import com.hellokaton.blade.mvc.route.RouteMatcher;
+import com.hellokaton.blade.mvc.route.WebHookRoute;
 import com.hellokaton.blade.mvc.ui.ModelAndView;
 import com.hellokaton.blade.mvc.ui.ResponseType;
 import io.netty.buffer.ByteBuf;
@@ -69,13 +70,14 @@ public class RouteMethodHandler implements RequestHandler {
         context.initRoute(route);
 
         // execution middleware
-        if (routeMatcher.middlewareCount() > 0 && !invokeMiddleware(routeMatcher.getMiddleware(), context)) {
+        List<Route> middlewareRoutes = routeMatcher.getBefore(uri);
+        if (!middlewareRoutes.isEmpty() && !invokeMiddleware(middlewareRoutes, context)) {
             return;
         }
         context.injectParameters();
 
         // web hook before
-        if (hasBeforeHook && !invokeHook(routeMatcher.getBefore(uri), context)) {
+        if (hasBeforeHook && !invokeHook(routeMatcher.getRouteBefore(uri), context)) {
             return;
         }
 
@@ -340,9 +342,27 @@ public class RouteMethodHandler implements RequestHandler {
             return true;
         }
         for (Route route : middleware) {
-            WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
-            boolean flag = webHook.before(context);
-            if (!flag) return false;
+            if (!(route instanceof WebHookRoute)) {
+                continue;
+            }
+            WebHookRoute whr = (WebHookRoute) route;
+            WebHookOptions options = whr.getOptions();
+            try {
+                if (options != null && !options.getPredicate().test(context)) {
+                    continue;
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: condition error", e);
+                continue;
+            }
+            try {
+                boolean flag = whr.getWebHook().before(context);
+                if (!flag) {
+                    return false;
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: invoke error", e);
+            }
         }
         return true;
     }
