@@ -5,6 +5,8 @@ import com.hellokaton.blade.kit.*;
 import com.hellokaton.blade.mvc.RouteContext;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookRule;
+import com.hellokaton.blade.mvc.hook.Middleware;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.route.mapping.dynamic.TrieMapping;
 import com.hellokaton.blade.mvc.ui.ResponseType;
@@ -36,7 +38,9 @@ public class RouteMatcher {
     // Storage URL and route
     private final Map<String, Route> routes = new HashMap<>(16);
     private final Map<String, List<Route>> hooks = new HashMap<>(8);
-    private List<Route> middleware = null;
+    // global middleware registered via Blade.use
+    private final List<Middleware> middleware = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final java.util.concurrent.atomic.AtomicLong middlewareSeq = new java.util.concurrent.atomic.AtomicLong();
     private final Map<String, Method[]> classMethodPool = new ConcurrentHashMap<>();
     private final Map<Class<?>, Object> controllerPool = new ConcurrentHashMap<>(8);
 
@@ -185,14 +189,11 @@ public class RouteMatcher {
         return afters;
     }
 
-    public List<Route> getMiddleware() {
+    public List<Middleware> getMiddleware() {
         return this.middleware;
     }
 
     public int middlewareCount() {
-        if (null == this.middleware) {
-            return 0;
-        }
         return this.middleware.size();
     }
 
@@ -284,12 +285,35 @@ public class RouteMatcher {
     }
 
     public void addMiddleware(WebHook webHook) {
-        if (null == this.middleware) {
-            this.middleware = new ArrayList<>(8);
+        addMiddleware(webHook, new WebHookRule());
+    }
+
+    public void addMiddleware(WebHook webHook, WebHookRule rule) {
+        long order = middlewareSeq.getAndIncrement();
+        Middleware candidate = new Middleware(webHook, rule, order);
+        for (Middleware m : middleware) {
+            if (m.isSame(candidate)) {
+                return; // duplicate
+            }
         }
-        Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
-        Route route = new Route(HttpMethod.BEFORE, "/**", webHook, WebHook.class, method, null);
-        this.middleware.add(route);
+        middleware.add(candidate);
+    }
+
+    public List<Middleware> getMiddleware(RouteContext context) {
+        if (middleware.isEmpty()) {
+            return Collections.emptyList();
+        }
+        String path = Middleware.normalize(context.uri());
+        String method = context.method().toUpperCase(Locale.ROOT);
+        List<Middleware> matched = new ArrayList<>();
+        for (Middleware m : middleware) {
+            if (m.matches(path, method, context)) {
+                matched.add(m);
+            }
+        }
+        matched.sort(Comparator.comparingInt(Middleware::getPriority)
+                .thenComparingLong(Middleware::getOrder));
+        return matched;
     }
 
 }
