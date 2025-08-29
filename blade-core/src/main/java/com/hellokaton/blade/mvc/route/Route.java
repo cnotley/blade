@@ -3,6 +3,7 @@ package com.hellokaton.blade.mvc.route;
 import com.hellokaton.blade.kit.PathKit;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.ui.ResponseType;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -60,6 +61,11 @@ public class Route {
     private int sort;
 
     /**
+     * Options for selective webhook execution
+     */
+    private WebHookOptions hookOptions;
+
+    /**
      * Url path params
      */
     @Builder.Default
@@ -107,6 +113,7 @@ public class Route {
         this.isWildcard = route.isWildcard;
         this.responseType = route.responseType;
         this.sort = route.sort;
+        this.hookOptions = route.hookOptions;
     }
 
     public String getAllPath() {
