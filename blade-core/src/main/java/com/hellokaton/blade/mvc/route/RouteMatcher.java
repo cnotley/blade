@@ -5,6 +5,7 @@ import com.hellokaton.blade.kit.*;
 import com.hellokaton.blade.mvc.RouteContext;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.route.mapping.dynamic.TrieMapping;
 import com.hellokaton.blade.mvc.ui.ResponseType;
@@ -15,6 +16,8 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -35,8 +38,9 @@ public class RouteMatcher {
 
     // Storage URL and route
     private final Map<String, Route> routes = new HashMap<>(16);
-    private final Map<String, List<Route>> hooks = new HashMap<>(8);
-    private List<Route> middleware = null;
+    private final Map<String, List<Route>> hooks = new ConcurrentHashMap<>();
+    private final List<Route> middleware = new CopyOnWriteArrayList<>();
+    private final AtomicLong hookIndex = new AtomicLong();
     private final Map<String, Method[]> classMethodPool = new ConcurrentHashMap<>();
     private final Map<Class<?>, Object> controllerPool = new ConcurrentHashMap<>(8);
 
@@ -55,11 +59,17 @@ public class RouteMatcher {
         Class<?> controllerType = route.getTargetType();
         Method method = route.getAction();
         ResponseType responseType = route.getResponseType();
-        return addRoute(httpMethod, path, controller, controllerType, method, responseType);
+        return addRoute(httpMethod, path, controller, controllerType, method, responseType, route.getHookOptions());
     }
 
     private Route addRoute(HttpMethod httpMethod, String path, Object controller,
                            Class<?> controllerType, Method method, ResponseType responseType) {
+        return addRoute(httpMethod, path, controller, controllerType, method, responseType, null);
+    }
+
+    private Route addRoute(HttpMethod httpMethod, String path, Object controller,
+                           Class<?> controllerType, Method method, ResponseType responseType,
+                           WebHookOptions options) {
 
         String key = path + "#" + httpMethod.name();
 
@@ -74,13 +84,15 @@ public class RouteMatcher {
             if (null != order) {
                 route.setSort(order.value());
             }
-            if (this.hooks.containsKey(key)) {
-                this.hooks.get(key).add(route);
-            } else {
-                List<Route> empty = new ArrayList<>();
-                empty.add(route);
-                this.hooks.put(key, empty);
+            WebHookOptions opts = options == null ? new WebHookOptions() : options;
+            if (options == null && route.getSort() != Integer.MAX_VALUE) {
+                opts.priority(route.getSort());
             }
+            opts.setOrder(hookIndex.getAndIncrement());
+            route.setHookOptions(opts);
+
+            List<Route> list = hooks.computeIfAbsent(key, k -> new CopyOnWriteArrayList<>());
+            list.add(route);
         } else {
             this.routes.put(key, route);
         }
@@ -88,8 +100,13 @@ public class RouteMatcher {
     }
 
     public Route addRoute(String path, RouteHandler handler, HttpMethod httpMethod) {
+        return addRoute(path, handler, httpMethod, null);
+    }
+
+    public Route addRoute(String path, RouteHandler handler, HttpMethod httpMethod, WebHookOptions options) {
         try {
-            return addRoute(httpMethod, path, handler);
+            Method method = RouteHandler.class.getMethod(RouteMatcher.METHOD_NAME, RouteContext.class);
+            return addRoute(httpMethod, path, handler, RouteHandler.class, method, null, options);
         } catch (Exception e) {
             log.error("", e);
         }
@@ -153,13 +170,16 @@ public class RouteMatcher {
      * @param path request path
      */
     public List<Route> getBefore(String path) {
-        String cleanPath = parsePath(path);
+        String cleanPath = WebHookOptions.normalizePath(path);
 
         List<Route> collect = hooks.values().stream()
                 .flatMap(Collection::stream)
-                .sorted(Comparator.comparingInt(Route::getSort))
                 .filter(route -> route.getHttpMethod() == HttpMethod.BEFORE)
                 .filter(route -> matchesPath(route.getRewritePath(), cleanPath))
+                .filter(route -> route.getHookOptions() == null || route.getHookOptions().matchesPath(cleanPath))
+                .sorted(Comparator
+                        .comparingInt((Route r) -> r.getHookOptions().getPriority())
+                        .thenComparingLong(r -> r.getHookOptions().getOrder()))
                 .collect(Collectors.toList());
 
         this.giveMatch(path, collect);
@@ -172,13 +192,16 @@ public class RouteMatcher {
      * @param path request path
      */
     public List<Route> getAfter(String path) {
-        String cleanPath = parsePath(path);
+        String cleanPath = WebHookOptions.normalizePath(path);
 
         List<Route> afters = hooks.values().stream()
                 .flatMap(Collection::stream)
-                .sorted(Comparator.comparingInt(Route::getSort))
                 .filter(route -> route.getHttpMethod() == HttpMethod.AFTER)
                 .filter(route -> matchesPath(route.getRewritePath(), cleanPath))
+                .filter(route -> route.getHookOptions() == null || route.getHookOptions().matchesPath(cleanPath))
+                .sorted(Comparator
+                        .comparingInt((Route r) -> r.getHookOptions().getPriority())
+                        .thenComparingLong(r -> r.getHookOptions().getOrder()))
                 .collect(Collectors.toList());
 
         this.giveMatch(path, afters);
@@ -190,9 +213,6 @@ public class RouteMatcher {
     }
 
     public int middlewareCount() {
-        if (null == this.middleware) {
-            return 0;
-        }
         return this.middleware.size();
     }
 
@@ -284,11 +304,22 @@ public class RouteMatcher {
     }
 
     public void addMiddleware(WebHook webHook) {
-        if (null == this.middleware) {
-            this.middleware = new ArrayList<>(8);
+        addMiddleware(webHook, null);
+    }
+
+    public void addMiddleware(WebHook webHook, WebHookOptions options) {
+        WebHookOptions opts = options == null ? new WebHookOptions() : options;
+        opts.setOrder(hookIndex.getAndIncrement());
+        // dedupe
+        for (Route route : middleware) {
+            if (route.getTarget() == webHook && opts.equals(route.getHookOptions())) {
+                return;
+            }
         }
+
         Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
         Route route = new Route(HttpMethod.BEFORE, "/**", webHook, WebHook.class, method, null);
+        route.setHookOptions(opts);
         this.middleware.add(route);
     }
 
