@@ -12,6 +12,7 @@ import com.hellokaton.blade.mvc.WebContext;
 import com.hellokaton.blade.mvc.handler.RequestHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.Cookie;
 import com.hellokaton.blade.mvc.http.*;
 import com.hellokaton.blade.mvc.route.Route;
@@ -339,10 +340,25 @@ public class RouteMethodHandler implements RequestHandler {
         if (BladeKit.isEmpty(middleware)) {
             return true;
         }
+        String path = WebHookOptions.normalize(context.uri());
+        HttpMethod method = context.request().httpMethod();
         for (Route route : middleware) {
+            WebHookOptions options = route.getOptions();
+            try {
+                if (options != null && !options.match(path, method, context)) {
+                    continue;
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: matching error", e);
+                continue;
+            }
             WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
-            boolean flag = webHook.before(context);
-            if (!flag) return false;
+            try {
+                boolean flag = webHook.before(context);
+                if (!flag) return false;
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: invocation error", e);
+            }
         }
         return true;
     }
@@ -355,7 +371,18 @@ public class RouteMethodHandler implements RequestHandler {
      * @return return invoke hook is abort
      */
     private boolean invokeHook(List<Route> hooks, RouteContext context) throws Exception {
+        String path = WebHookOptions.normalize(context.uri());
+        HttpMethod method = context.request().httpMethod();
         for (Route hook : hooks) {
+            WebHookOptions options = hook.getOptions();
+            try {
+                if (options != null && !options.match(path, method, context)) {
+                    continue;
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: matching error", e);
+                continue;
+            }
             if (hook.getTargetType() == RouteHandler.class) {
                 RouteHandler routeHandler = (RouteHandler) hook.getTarget();
                 routeHandler.handle(context);
