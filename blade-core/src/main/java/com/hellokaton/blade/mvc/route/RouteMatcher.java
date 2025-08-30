@@ -5,6 +5,7 @@ import com.hellokaton.blade.kit.*;
 import com.hellokaton.blade.mvc.RouteContext;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.route.mapping.dynamic.TrieMapping;
 import com.hellokaton.blade.mvc.ui.ResponseType;
@@ -15,6 +16,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -35,8 +37,10 @@ public class RouteMatcher {
 
     // Storage URL and route
     private final Map<String, Route> routes = new HashMap<>(16);
-    private final Map<String, List<Route>> hooks = new HashMap<>(8);
+    private final Map<String, List<Route>> hooks = new ConcurrentHashMap<>(8);
     private List<Route> middleware = null;
+    private final Map<Route, WebHookOptions> hookOptions = new ConcurrentHashMap<>();
+    private static final WebHookOptions DEFAULT_OPTIONS = new WebHookOptions();
     private final Map<String, Method[]> classMethodPool = new ConcurrentHashMap<>();
     private final Map<Class<?>, Object> controllerPool = new ConcurrentHashMap<>(8);
 
@@ -46,6 +50,19 @@ public class RouteMatcher {
         Class<?> handleType = handler.getClass();
         Method method = handleType.getMethod(RouteMatcher.METHOD_NAME, RouteContext.class);
         return addRoute(httpMethod, path, handler, RouteHandler.class, method, null);
+    }
+
+    public Route addRoute(String path, RouteHandler handler, HttpMethod httpMethod, WebHookOptions options) {
+        try {
+            Route route = addRoute(httpMethod, path, handler);
+            if (null != route && httpMethod == HttpMethod.BEFORE) {
+                hookOptions.put(route, options == null ? new WebHookOptions() : options);
+            }
+            return route;
+        } catch (Exception e) {
+            log.error("", e);
+        }
+        return null;
     }
 
     Route addRoute(Route route) {
@@ -77,7 +94,7 @@ public class RouteMatcher {
             if (this.hooks.containsKey(key)) {
                 this.hooks.get(key).add(route);
             } else {
-                List<Route> empty = new ArrayList<>();
+                List<Route> empty = new CopyOnWriteArrayList<>();
                 empty.add(route);
                 this.hooks.put(key, empty);
             }
@@ -157,9 +174,13 @@ public class RouteMatcher {
 
         List<Route> collect = hooks.values().stream()
                 .flatMap(Collection::stream)
-                .sorted(Comparator.comparingInt(Route::getSort))
                 .filter(route -> route.getHttpMethod() == HttpMethod.BEFORE)
                 .filter(route -> matchesPath(route.getRewritePath(), cleanPath))
+                .filter(route -> getHookOptions(route).matchesPath(path))
+                .sorted(Comparator.comparingInt(r -> {
+                    WebHookOptions opt = getHookOptions(r);
+                    return opt.isPrioritySet() ? opt.getPriority() : r.getSort();
+                }))
                 .collect(Collectors.toList());
 
         this.giveMatch(path, collect);
@@ -194,6 +215,10 @@ public class RouteMatcher {
             return 0;
         }
         return this.middleware.size();
+    }
+
+    public WebHookOptions getHookOptions(Route route) {
+        return hookOptions.getOrDefault(route, DEFAULT_OPTIONS);
     }
 
     /**
@@ -284,12 +309,17 @@ public class RouteMatcher {
     }
 
     public void addMiddleware(WebHook webHook) {
+        addMiddleware(webHook, new WebHookOptions());
+    }
+
+    public void addMiddleware(WebHook webHook, WebHookOptions options) {
         if (null == this.middleware) {
-            this.middleware = new ArrayList<>(8);
+            this.middleware = new CopyOnWriteArrayList<>();
         }
         Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
         Route route = new Route(HttpMethod.BEFORE, "/**", webHook, WebHook.class, method, null);
         this.middleware.add(route);
+        hookOptions.put(route, options == null ? new WebHookOptions() : options);
     }
 
 }

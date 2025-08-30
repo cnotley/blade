@@ -12,6 +12,7 @@ import com.hellokaton.blade.mvc.WebContext;
 import com.hellokaton.blade.mvc.handler.RequestHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.Cookie;
 import com.hellokaton.blade.mvc.http.*;
 import com.hellokaton.blade.mvc.route.Route;
@@ -33,9 +34,11 @@ import java.io.StringWriter;
 import java.lang.reflect.Method;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 import static com.hellokaton.blade.mvc.BladeConst.REQUEST_TO_STATIC_ATTR;
 import static io.netty.handler.codec.http.HttpHeaderNames.TRANSFER_ENCODING;
@@ -339,10 +342,30 @@ public class RouteMethodHandler implements RequestHandler {
         if (BladeKit.isEmpty(middleware)) {
             return true;
         }
-        for (Route route : middleware) {
-            WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
-            boolean flag = webHook.before(context);
-            if (!flag) return false;
+        HttpMethod requestMethod = null;
+        try {
+            requestMethod = context.request().httpMethod();
+        } catch (Exception ignored) {
+        }
+        String uri = context.uri();
+        List<Route> sorted = middleware.stream()
+                .sorted(Comparator.comparingInt(r -> {
+                    WebHookOptions opt = routeMatcher.getHookOptions(r);
+                    return opt.isPrioritySet() ? opt.getPriority() : r.getSort();
+                }))
+                .collect(Collectors.toList());
+        for (Route route : sorted) {
+            WebHookOptions opt = routeMatcher.getHookOptions(route);
+            try {
+                if (!opt.matchesPath(uri) || !opt.matchesMethod(requestMethod) || !opt.matchesPredicate(context)) {
+                    continue;
+                }
+                WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
+                boolean flag = webHook.before(context);
+                if (!flag) return false;
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: {}", e.getMessage(), e);
+            }
         }
         return true;
     }
@@ -354,17 +377,31 @@ public class RouteMethodHandler implements RequestHandler {
      * @param context http request
      * @return return invoke hook is abort
      */
-    private boolean invokeHook(List<Route> hooks, RouteContext context) throws Exception {
+    private boolean invokeHook(List<Route> hooks, RouteContext context) {
+        HttpMethod requestMethod = null;
+        try {
+            requestMethod = context.request().httpMethod();
+        } catch (Exception ignored) {
+        }
+        String uri = context.uri();
         for (Route hook : hooks) {
-            if (hook.getTargetType() == RouteHandler.class) {
-                RouteHandler routeHandler = (RouteHandler) hook.getTarget();
-                routeHandler.handle(context);
-                if (context.isAbort()) {
-                    return false;
+            WebHookOptions opt = routeMatcher.getHookOptions(hook);
+            try {
+                if (!opt.matchesPath(uri) || !opt.matchesMethod(requestMethod) || !opt.matchesPredicate(context)) {
+                    continue;
                 }
-            } else {
-                boolean flag = this.invokeHook(context, hook);
-                if (!flag) return false;
+                if (hook.getTargetType() == RouteHandler.class) {
+                    RouteHandler routeHandler = (RouteHandler) hook.getTarget();
+                    routeHandler.handle(context);
+                    if (context.isAbort()) {
+                        return false;
+                    }
+                } else {
+                    boolean flag = this.invokeHook(context, hook);
+                    if (!flag) return false;
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: {}", e.getMessage(), e);
             }
         }
         return true;
