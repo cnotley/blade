@@ -5,6 +5,7 @@ import com.hellokaton.blade.kit.*;
 import com.hellokaton.blade.mvc.RouteContext;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.route.mapping.dynamic.TrieMapping;
 import com.hellokaton.blade.mvc.ui.ResponseType;
@@ -88,8 +89,18 @@ public class RouteMatcher {
     }
 
     public Route addRoute(String path, RouteHandler handler, HttpMethod httpMethod) {
+        return addRoute(path, handler, httpMethod, null);
+    }
+
+    public Route addRoute(String path, RouteHandler handler, HttpMethod httpMethod, WebHookOptions options) {
         try {
-            return addRoute(httpMethod, path, handler);
+            Route route = addRoute(httpMethod, path, handler);
+            if (options == null) {
+                options = new WebHookOptions();
+            }
+            options.assignOrder();
+            route.setOptions(options);
+            return route;
         } catch (Exception e) {
             log.error("", e);
         }
@@ -153,13 +164,25 @@ public class RouteMatcher {
      * @param path request path
      */
     public List<Route> getBefore(String path) {
-        String cleanPath = parsePath(path);
+        String cleanPath = WebHookOptions.normalize(path);
 
         List<Route> collect = hooks.values().stream()
                 .flatMap(Collection::stream)
-                .sorted(Comparator.comparingInt(Route::getSort))
                 .filter(route -> route.getHttpMethod() == HttpMethod.BEFORE)
                 .filter(route -> matchesPath(route.getRewritePath(), cleanPath))
+                .filter(route -> {
+                    WebHookOptions opts = route.getOptions();
+                    return opts == null || opts.matchPath(cleanPath);
+                })
+                .sorted(Comparator
+                        .comparingInt((Route r) -> {
+                            WebHookOptions o = r.getOptions();
+                            return o != null ? o.getPriority() : 0;
+                        })
+                        .thenComparingLong(r -> {
+                            WebHookOptions o = r.getOptions();
+                            return o != null ? o.getOrder() : 0L;
+                        }))
                 .collect(Collectors.toList());
 
         this.giveMatch(path, collect);
@@ -284,11 +307,20 @@ public class RouteMatcher {
     }
 
     public void addMiddleware(WebHook webHook) {
+        addMiddleware(webHook, new WebHookOptions());
+    }
+
+    public void addMiddleware(WebHook webHook, WebHookOptions options) {
         if (null == this.middleware) {
-            this.middleware = new ArrayList<>(8);
+            this.middleware = new java.util.concurrent.CopyOnWriteArrayList<>();
         }
         Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
         Route route = new Route(HttpMethod.BEFORE, "/**", webHook, WebHook.class, method, null);
+        if (options == null) {
+            options = new WebHookOptions();
+        }
+        options.assignOrder();
+        route.setOptions(options);
         this.middleware.add(route);
     }
 
