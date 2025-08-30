@@ -59,6 +59,10 @@ public class Route {
 
     private int sort;
 
+    private com.hellokaton.blade.mvc.hook.WebHookOptions webHookOptions;
+
+    private long registerOrder;
+
     /**
      * Url path params
      */
@@ -107,6 +111,8 @@ public class Route {
         this.isWildcard = route.isWildcard;
         this.responseType = route.responseType;
         this.sort = route.sort;
+        this.webHookOptions = route.webHookOptions;
+        this.registerOrder = route.registerOrder;
     }
 
     public String getAllPath() {

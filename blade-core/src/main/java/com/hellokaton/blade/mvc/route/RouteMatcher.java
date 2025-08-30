@@ -35,8 +35,9 @@ public class RouteMatcher {
 
     // Storage URL and route
     private final Map<String, Route> routes = new HashMap<>(16);
-    private final Map<String, List<Route>> hooks = new HashMap<>(8);
-    private List<Route> middleware = null;
+    private final Map<String, List<Route>> hooks = new java.util.concurrent.ConcurrentHashMap<>(8);
+    private final java.util.concurrent.atomic.AtomicLong orderSeq = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.CopyOnWriteArrayList<Route> middleware = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final Map<String, Method[]> classMethodPool = new ConcurrentHashMap<>();
     private final Map<Class<?>, Object> controllerPool = new ConcurrentHashMap<>(8);
 
@@ -74,26 +75,45 @@ public class RouteMatcher {
             if (null != order) {
                 route.setSort(order.value());
             }
-            if (this.hooks.containsKey(key)) {
-                this.hooks.get(key).add(route);
-            } else {
-                List<Route> empty = new ArrayList<>();
-                empty.add(route);
-                this.hooks.put(key, empty);
-            }
+            this.hooks.compute(key, (k, v) -> {
+                List<Route> list = v == null ? new java.util.concurrent.CopyOnWriteArrayList<>() : v;
+                list.add(route);
+                return list;
+            });
         } else {
             this.routes.put(key, route);
         }
+        route.setRegisterOrder(orderSeq.incrementAndGet());
         return route;
     }
 
     public Route addRoute(String path, RouteHandler handler, HttpMethod httpMethod) {
+        return addRoute(path, handler, httpMethod, null);
+    }
+
+    public Route addRoute(String path, RouteHandler handler, HttpMethod httpMethod,
+                          com.hellokaton.blade.mvc.hook.WebHookOptions options) {
         try {
-            return addRoute(httpMethod, path, handler);
+            Route route = addRoute(httpMethod, path, handler);
+            if (null != route && BladeKit.isWebHook(httpMethod)) {
+                com.hellokaton.blade.mvc.hook.WebHookOptions opts = options == null ?
+                        new com.hellokaton.blade.mvc.hook.WebHookOptions() : options;
+                opts.addIncludes(path);
+                bindOptions(route, opts);
+            } else if (null != route) {
+                route.setRegisterOrder(orderSeq.incrementAndGet());
+            }
+            return route;
         } catch (Exception e) {
             log.error("", e);
         }
         return null;
+    }
+
+    private void bindOptions(Route route, com.hellokaton.blade.mvc.hook.WebHookOptions options) {
+        options.setOrder(orderSeq.incrementAndGet());
+        route.setWebHookOptions(options);
+        route.setRegisterOrder(options.getOrder());
     }
 
     public void route(String path, Class<?> clazz, String methodName) {
@@ -153,16 +173,24 @@ public class RouteMatcher {
      * @param path request path
      */
     public List<Route> getBefore(String path) {
-        String cleanPath = parsePath(path);
+        String cleanPath = PathKit.normalize(path);
 
         List<Route> collect = hooks.values().stream()
                 .flatMap(Collection::stream)
-                .sorted(Comparator.comparingInt(Route::getSort))
                 .filter(route -> route.getHttpMethod() == HttpMethod.BEFORE)
-                .filter(route -> matchesPath(route.getRewritePath(), cleanPath))
+                .filter(route -> {
+                    com.hellokaton.blade.mvc.hook.WebHookOptions opt = route.getWebHookOptions();
+                    return null == opt || opt.matchPath(cleanPath);
+                })
+                .sorted(Comparator
+                        .comparingInt((Route r) -> {
+                            com.hellokaton.blade.mvc.hook.WebHookOptions opt = r.getWebHookOptions();
+                            return null == opt ? 0 : opt.getPriority();
+                        })
+                        .thenComparingLong(Route::getRegisterOrder))
                 .collect(Collectors.toList());
 
-        this.giveMatch(path, collect);
+        this.giveMatch(cleanPath, collect);
         return collect;
     }
 
@@ -172,16 +200,19 @@ public class RouteMatcher {
      * @param path request path
      */
     public List<Route> getAfter(String path) {
-        String cleanPath = parsePath(path);
+        String cleanPath = PathKit.normalize(path);
 
         List<Route> afters = hooks.values().stream()
                 .flatMap(Collection::stream)
-                .sorted(Comparator.comparingInt(Route::getSort))
                 .filter(route -> route.getHttpMethod() == HttpMethod.AFTER)
-                .filter(route -> matchesPath(route.getRewritePath(), cleanPath))
+                .filter(route -> {
+                    com.hellokaton.blade.mvc.hook.WebHookOptions opt = route.getWebHookOptions();
+                    return null == opt || opt.matchPath(cleanPath);
+                })
+                .sorted(Comparator.comparingLong(Route::getRegisterOrder))
                 .collect(Collectors.toList());
 
-        this.giveMatch(path, afters);
+        this.giveMatch(cleanPath, afters);
         return afters;
     }
 
@@ -190,9 +221,6 @@ public class RouteMatcher {
     }
 
     public int middlewareCount() {
-        if (null == this.middleware) {
-            return 0;
-        }
         return this.middleware.size();
     }
 
@@ -209,17 +237,6 @@ public class RouteMatcher {
             }
             return -1;
         });
-    }
-
-    /**
-     * Matching path
-     *
-     * @param routePath   route path
-     * @param pathToMatch match path
-     * @return return match is success
-     */
-    private boolean matchesPath(String routePath, String pathToMatch) {
-        return pathToMatch.startsWith(routePath);
     }
 
     /**
@@ -284,11 +301,20 @@ public class RouteMatcher {
     }
 
     public void addMiddleware(WebHook webHook) {
-        if (null == this.middleware) {
-            this.middleware = new ArrayList<>(8);
-        }
+        addMiddleware(webHook, null);
+    }
+
+    public void addMiddleware(WebHook webHook, com.hellokaton.blade.mvc.hook.WebHookOptions options) {
         Method method = ReflectKit.getMethod(WebHook.class, HttpMethod.BEFORE.name().toLowerCase(), RouteContext.class);
         Route route = new Route(HttpMethod.BEFORE, "/**", webHook, WebHook.class, method, null);
+        com.hellokaton.blade.mvc.hook.WebHookOptions opts = options == null ?
+                new com.hellokaton.blade.mvc.hook.WebHookOptions().addIncludes("/**") : options;
+        for (Route r : middleware) {
+            if (r.getTarget() == webHook && opts.equals(r.getWebHookOptions())) {
+                return;
+            }
+        }
+        bindOptions(route, opts);
         this.middleware.add(route);
     }
 
