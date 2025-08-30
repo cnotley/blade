@@ -28,6 +28,7 @@ import com.hellokaton.blade.mvc.handler.DefaultExceptionHandler;
 import com.hellokaton.blade.mvc.handler.ExceptionHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.http.session.SessionManager;
 import com.hellokaton.blade.mvc.route.RouteMatcher;
@@ -239,6 +240,11 @@ public class Blade {
      */
     public Blade before(@NonNull String path, @NonNull RouteHandler handler) {
         this.routeMatcher.addRoute(path, handler, HttpMethod.BEFORE);
+        return this;
+    }
+
+    public Blade before(@NonNull String path, @NonNull RouteHandler handler, @NonNull WebHookOptions options) {
+        this.routeMatcher.addRoute(path, handler, HttpMethod.BEFORE, options);
         return this;
     }
 
@@ -540,6 +546,12 @@ public class Blade {
             this.routeMatcher.addMiddleware(webHook);
             this.register(webHook);
         }
+        return this;
+    }
+
+    public Blade use(@NonNull WebHook webHook, @NonNull WebHookOptions options) {
+        this.routeMatcher.addMiddleware(webHook, options);
+        this.register(webHook);
         return this;
     }
 

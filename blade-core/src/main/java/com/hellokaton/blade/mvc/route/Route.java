@@ -65,6 +65,8 @@ public class Route {
     @Builder.Default
     private Map<String, String> pathParams = Collections.emptyMap();
 
+    private com.hellokaton.blade.mvc.hook.WebHookOptions webHookOptions;
+
     public Route() {
         this.sort = Integer.MAX_VALUE;
     }
