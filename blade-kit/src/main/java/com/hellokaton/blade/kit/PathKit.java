@@ -44,6 +44,40 @@ public class PathKit {
         return path.replaceAll("[/]+", SLASH);
     }
 
+    /**
+     * Normalize a request path for matching.
+     * <p>
+     * This extracts the path component, decodes percent-encoding,
+     * collapses duplicate slashes and removes a trailing slash
+     * (except for the root path). Result is lower-cased using
+     * {@link java.util.Locale#ROOT}.
+     * </p>
+     *
+     * @param uri original request URI or path
+     * @return normalized lower-case path
+     */
+    public static String normalize(String uri) {
+        if (null == uri || uri.isEmpty()) {
+            return SLASH;
+        }
+        String path;
+        try {
+            java.net.URI u = new java.net.URI(fixPath(uri));
+            path = u.getPath();
+        } catch (Exception e) {
+            path = fixPath(uri);
+        }
+        try {
+            path = java.net.URLDecoder.decode(path, java.nio.charset.StandardCharsets.UTF_8.name());
+        } catch (Exception ignored) {
+        }
+        path = cleanPath(path);
+        if (path.length() > 1 && path.endsWith(SLASH)) {
+            path = path.substring(0, path.length() - 1);
+        }
+        return path.toLowerCase(java.util.Locale.ROOT);
+    }
+
     private class Node {
         private String path;
         private String segment;
