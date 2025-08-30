@@ -28,7 +28,7 @@ import com.hellokaton.blade.mvc.handler.DefaultExceptionHandler;
 import com.hellokaton.blade.mvc.handler.ExceptionHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
-import com.hellokaton.blade.mvc.http.HttpMethod;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.session.SessionManager;
 import com.hellokaton.blade.mvc.route.RouteMatcher;
 import com.hellokaton.blade.mvc.ui.template.DefaultEngine;
@@ -190,7 +190,7 @@ public class Blade {
      * @return blade instance
      */
     public Blade get(@NonNull String path, @NonNull RouteHandler handler) {
-        this.routeMatcher.addRoute(path, handler, HttpMethod.GET);
+        this.routeMatcher.addRoute(path, handler, com.hellokaton.blade.mvc.http.HttpMethod.GET);
         return this;
     }
 
@@ -202,7 +202,7 @@ public class Blade {
      * @return return blade instance
      */
     public Blade post(@NonNull String path, @NonNull RouteHandler handler) {
-        this.routeMatcher.addRoute(path, handler, HttpMethod.POST);
+        this.routeMatcher.addRoute(path, handler, com.hellokaton.blade.mvc.http.HttpMethod.POST);
         return this;
     }
 
@@ -214,7 +214,7 @@ public class Blade {
      * @return return blade instance
      */
     public Blade put(@NonNull String path, @NonNull RouteHandler handler) {
-        this.routeMatcher.addRoute(path, handler, HttpMethod.PUT);
+        this.routeMatcher.addRoute(path, handler, com.hellokaton.blade.mvc.http.HttpMethod.PUT);
         return this;
     }
 
@@ -226,7 +226,7 @@ public class Blade {
      * @return return blade instance
      */
     public Blade delete(@NonNull String path, @NonNull RouteHandler handler) {
-        this.routeMatcher.addRoute(path, handler, HttpMethod.DELETE);
+        this.routeMatcher.addRoute(path, handler, com.hellokaton.blade.mvc.http.HttpMethod.DELETE);
         return this;
     }
 
@@ -238,7 +238,12 @@ public class Blade {
      * @return return blade instance
      */
     public Blade before(@NonNull String path, @NonNull RouteHandler handler) {
-        this.routeMatcher.addRoute(path, handler, HttpMethod.BEFORE);
+        this.routeMatcher.addRoute(path, handler, com.hellokaton.blade.mvc.http.HttpMethod.BEFORE);
+        return this;
+    }
+
+    public Blade before(@NonNull String path, @NonNull RouteHandler handler, WebHookOptions options) {
+        this.routeMatcher.addRoute(path, handler, com.hellokaton.blade.mvc.http.HttpMethod.BEFORE, options);
         return this;
     }
 
@@ -250,7 +255,7 @@ public class Blade {
      * @return return blade instance
      */
     public Blade after(@NonNull String path, @NonNull RouteHandler handler) {
-        this.routeMatcher.addRoute(path, handler, HttpMethod.AFTER);
+        this.routeMatcher.addRoute(path, handler, com.hellokaton.blade.mvc.http.HttpMethod.AFTER);
         return this;
     }
 
@@ -540,6 +545,12 @@ public class Blade {
             this.routeMatcher.addMiddleware(webHook);
             this.register(webHook);
         }
+        return this;
+    }
+
+    public Blade use(@NonNull WebHook webHook, WebHookOptions options) {
+        this.routeMatcher.addMiddleware(webHook, options);
+        this.register(webHook);
         return this;
     }
 

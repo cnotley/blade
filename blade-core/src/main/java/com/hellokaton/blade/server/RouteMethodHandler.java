@@ -12,6 +12,7 @@ import com.hellokaton.blade.mvc.WebContext;
 import com.hellokaton.blade.mvc.handler.RequestHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.Cookie;
 import com.hellokaton.blade.mvc.http.*;
 import com.hellokaton.blade.mvc.route.Route;
@@ -339,10 +340,25 @@ public class RouteMethodHandler implements RequestHandler {
         if (BladeKit.isEmpty(middleware)) {
             return true;
         }
+        String path = WebHookOptions.normalizePath(context.uri());
+        com.hellokaton.blade.mvc.http.HttpMethod method;
+        try {
+            method = com.hellokaton.blade.mvc.http.HttpMethod.valueOf(context.method());
+        } catch (Exception e) {
+            method = com.hellokaton.blade.mvc.http.HttpMethod.ALL;
+        }
         for (Route route : middleware) {
-            WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
-            boolean flag = webHook.before(context);
-            if (!flag) return false;
+            try {
+                WebHookOptions opts = route.getOptions();
+                if (null != opts && !opts.test(context, path, method)) {
+                    continue;
+                }
+                WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
+                boolean flag = webHook.before(context);
+                if (!flag) return false;
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: {} invocation error", route.getTargetType().getName(), e);
+            }
         }
         return true;
     }
@@ -355,16 +371,33 @@ public class RouteMethodHandler implements RequestHandler {
      * @return return invoke hook is abort
      */
     private boolean invokeHook(List<Route> hooks, RouteContext context) throws Exception {
+        String path = WebHookOptions.normalizePath(context.uri());
+        com.hellokaton.blade.mvc.http.HttpMethod method;
+        try {
+            method = com.hellokaton.blade.mvc.http.HttpMethod.valueOf(context.method());
+        } catch (Exception e) {
+            method = com.hellokaton.blade.mvc.http.HttpMethod.ALL;
+        }
         for (Route hook : hooks) {
-            if (hook.getTargetType() == RouteHandler.class) {
-                RouteHandler routeHandler = (RouteHandler) hook.getTarget();
-                routeHandler.handle(context);
-                if (context.isAbort()) {
-                    return false;
+            try {
+                if (hook.getHttpMethod() == com.hellokaton.blade.mvc.http.HttpMethod.BEFORE) {
+                    WebHookOptions opts = hook.getOptions();
+                    if (null != opts && !opts.testDynamic(context, path, method)) {
+                        continue;
+                    }
                 }
-            } else {
-                boolean flag = this.invokeHook(context, hook);
-                if (!flag) return false;
+                if (hook.getTargetType() == RouteHandler.class) {
+                    RouteHandler routeHandler = (RouteHandler) hook.getTarget();
+                    routeHandler.handle(context);
+                    if (context.isAbort()) {
+                        return false;
+                    }
+                } else {
+                    boolean flag = this.invokeHook(context, hook);
+                    if (!flag) return false;
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: {} invocation error", hook.getTargetType().getName(), e);
             }
         }
         return true;

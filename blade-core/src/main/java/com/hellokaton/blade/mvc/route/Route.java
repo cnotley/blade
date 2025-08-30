@@ -59,6 +59,10 @@ public class Route {
 
     private int sort;
 
+    private com.hellokaton.blade.mvc.hook.WebHookOptions options;
+
+    private long registerOrder;
+
     /**
      * Url path params
      */
@@ -121,6 +125,13 @@ public class Route {
     @Override
     public String toString() {
         return httpMethod + "\t" + path;
+    }
+
+    public int getPriority() {
+        if (null == this.options) {
+            return 0;
+        }
+        return this.options.getPriority();
     }
 
 }
