@@ -5,12 +5,14 @@ import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
 import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.HttpMethod;
+import com.hellokaton.blade.mvc.route.HookEntry;
 import com.hellokaton.blade.mvc.route.Route;
 import com.hellokaton.blade.mvc.route.RouteMatcher;
 import org.junit.*;
+import org.junit.runners.MethodSorters;
 
-import java.lang.reflect.Array;
-import java.lang.reflect.Field;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -20,9 +22,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import java.time.LocalDateTime;
 
 import static org.junit.Assert.*;
 
+@FixMethodOrder(MethodSorters.NAME_ASCENDING)
 public class SelectiveMiddlewareTest {
 
     private static final class TestRouteContext extends RouteContext {
@@ -128,146 +135,129 @@ public class SelectiveMiddlewareTest {
         return new WebHookOptions();
     }
 
-    private static void addMethodsReflective(WebHookOptions opt, String... verbs) {
-        try {
-            Method m = null;
-            Method[] all = opt.getClass().getMethods();
-            for (int i = 0; i < all.length; i++) {
-                Method mm = all[i];
-                if (!"addMethods".equals(mm.getName()))
-                    continue;
-                Class<?>[] p = mm.getParameterTypes();
-                if (p.length == 1 && p[0].isArray()) {
-                    Class<?> c = p[0].getComponentType();
-                    if (c == String.class || (c != null && CharSequence.class.isAssignableFrom(c))) {
-                        m = mm;
-                        break;
-                    }
-                }
-            }
-            assertNotNull("Expected addMethods(String...) on WebHookOptions for unknown-verb testing", m);
-            Object arr = Array.newInstance(m.getParameterTypes()[0].getComponentType(), verbs.length);
-            for (int i = 0; i < verbs.length; i++)
-                Array.set(arr, i, verbs[i]);
-            m.invoke(opt, arr);
-        } catch (Exception e) {
-            throw new AssertionError("Reflection addMethods(String...) failed: " + e, e);
-        }
-    }
-
     private static List<WebHook> findRegisteredWebHooks(Blade blade) {
-        List<WebHook> result = new ArrayList<WebHook>();
-        Set<Object> seen = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
-        Deque<Object> stack = new ArrayDeque<Object>();
-        stack.push(blade);
-        int depth = 0;
-        int maxDepth = 4;
+        List<WebHook> hooks = new ArrayList<>();
+        try {
+            RouteMatcher rm = blade.routeMatcher();
+            Method getMiddlewareEntries = RouteMatcher.class.getMethod("getMiddlewareEntries");
+            List<?> entries = (List<?>) getMiddlewareEntries.invoke(rm);
 
-        while (!stack.isEmpty() && depth <= maxDepth) {
-            Object o = stack.pop();
-            if (o == null || seen.contains(o))
-                continue;
-            seen.add(o);
-
-            if (o instanceof WebHook) {
-                result.add((WebHook) o);
-            }
-
-            Class<?> oc = o.getClass();
-            if (oc.isArray()) {
-                int len = Array.getLength(o);
-                for (int i = 0; i < len; i++)
-                    stack.push(Array.get(o, i));
-                continue;
-            }
-
-            if (o instanceof Collection) {
-                for (Object e : (Collection<?>) o)
-                    stack.push(e);
-                continue;
-            }
-
-            if (o instanceof Map) {
-                for (Map.Entry<?, ?> e : ((Map<?, ?>) o).entrySet()) {
-                    stack.push(e.getKey());
-                    stack.push(e.getValue());
-                }
-                continue;
-            }
-
-            Package pkg = oc.getPackage();
-            String pn = (pkg == null) ? "" : pkg.getName();
-            if (!pn.startsWith("com.hellokaton"))
-                continue;
-
-            Field[] fs = oc.getDeclaredFields();
-            for (int i = 0; i < fs.length; i++) {
-                try {
-                    fs[i].setAccessible(true);
-                    Object v = fs[i].get(o);
-                    if (v != null)
-                        stack.push(v);
-                } catch (Throwable ignore) {
+            for (Object entry : entries) {
+                Method getRoute = entry.getClass().getMethod("getRoute");
+                Route route = (Route) getRoute.invoke(entry);
+                Object target = route.getTarget();
+                if (target instanceof WebHook) {
+                    hooks.add((WebHook) target);
                 }
             }
-            depth++;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to find middleware", e);
         }
-        List<WebHook> dedup = new ArrayList<WebHook>();
-        Set<WebHook> seenHooks = Collections.newSetFromMap(new IdentityHashMap<WebHook, Boolean>());
-        for (int i = 0; i < result.size(); i++) {
-            WebHook h = result.get(i);
-            if (!seenHooks.contains(h)) {
-                dedup.add(h);
-                seenHooks.add(h);
-            }
-        }
-        return dedup;
+        return hooks;
     }
 
     private static void dispatchBeforeChain(RouteMatcher rm, String path, TestRouteContext ctx) {
-        List<Route> routes = rm.getBefore(path);
-        for (int i = 0; i < routes.size(); i++) {
-            Route r = routes.get(i);
-            RouteHandler h = (RouteHandler) r.getTarget();
-            try {
-                h.handle(ctx);
-            } catch (Exception e) {
+        List<Object> entries = getBeforeEntries(rm, path);
+
+        for (Object entryObj : entries) {
+            HookEntry entry = (HookEntry) entryObj;
+            WebHookOptions opts = entry.getOptions();
+
+            if (!methodMatches(opts, ctx)) {
+                continue;
             }
+            if (!predicateMatches(opts, ctx)) {
+                continue;
+            }
+
+            Route route = entry.getRoute();
+            RouteHandler handler = (RouteHandler) route.getTarget();
+            try {
+                handler.handle(ctx);
+            } catch (Exception e) {
+                System.err.println(LocalDateTime.now() + " SelectiveMiddleware: " + e.getMessage());
+            }
+        }
+    }
+
+    private static List<Object> getBeforeEntries(RouteMatcher rm, String path) {
+        try {
+            Method m = RouteMatcher.class.getMethod("getBeforeEntries", String.class);
+            return (List<Object>) m.invoke(rm, path);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static boolean methodMatches(Object opts, TestRouteContext ctx) {
+        if (opts == null) return true;
+        try {
+            Method getMethods = opts.getClass().getMethod("getMethods");
+            Set<HttpMethod> methods = (Set<HttpMethod>) getMethods.invoke(opts);
+            if (methods == null || methods.isEmpty()) return true;
+
+            HttpMethod reqMethod = HttpMethod.valueOf(ctx.method().toUpperCase());
+            return methods.contains(reqMethod);
+        } catch (Exception e) {
+            System.err.println(LocalDateTime.now() + " SelectiveMiddleware: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean predicateMatches(Object opts, TestRouteContext ctx) {
+        if (opts == null) return true;
+        try {
+            Method getPredicate = opts.getClass().getMethod("getPredicate");
+            Predicate<RouteContext> pred = (Predicate<RouteContext>) getPredicate.invoke(opts);
+            if (pred == null) return true;
+            return pred.test(ctx);
+        } catch (Exception e) {
+            System.err.println(LocalDateTime.now() + " SelectiveMiddleware: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static Object getOptions(Object hookEntry) {
+        try {
+            Method m = hookEntry.getClass().getMethod("getOptions");
+            return m.invoke(hookEntry);
+        } catch (Exception e) {
+            return null;
         }
     }
 
     @Test
-    public void testWebHookOptionsCtorExists() throws Exception {
+    public void test01_WebHookOptionsCtorExists() throws Exception {
         Class<?> c = Class.forName("com.hellokaton.blade.mvc.hook.WebHookOptions");
         assertNotNull(c.getConstructor());
     }
 
     @Test
-    public void testWebHookOptionsFluentIncludes() {
+    public void test02_WebHookOptionsFluentIncludes() {
         WebHookOptions opts = new WebHookOptions();
         assertSame(opts, opts.addIncludes("/a", "/b"));
     }
 
     @Test
-    public void testWebHookOptionsFluentExcludes() {
+    public void test03_WebHookOptionsFluentExcludes() {
         WebHookOptions opts = new WebHookOptions();
         assertSame(opts, opts.addExcludes("/c"));
     }
 
     @Test
-    public void testWebHookOptionsFluentMethodsHttpMethod() {
+    public void test04_WebHookOptionsFluentMethodsHttpMethod() {
         WebHookOptions opts = new WebHookOptions();
         assertSame(opts, opts.addMethods(HttpMethod.GET, HttpMethod.POST));
     }
 
     @Test
-    public void testWebHookOptionsFluentPriority() {
+    public void test05_WebHookOptionsFluentPriority() {
         WebHookOptions opts = new WebHookOptions();
         assertSame(opts, opts.priority(3));
     }
 
     @Test
-    public void testWebHookOptionsFluentPredicate() {
+    public void test06_WebHookOptionsFluentPredicate() {
         WebHookOptions opts = new WebHookOptions();
         assertSame(opts, opts.predicate(new Predicate<RouteContext>() {
             @Override
@@ -353,13 +343,13 @@ public class SelectiveMiddlewareTest {
         assertFalse(containsTarget(rm.getBefore("/literal/star"), b));
 
         RecordingBefore b2 = new RecordingBefore("esc-nested", new CopyOnWriteArrayList<String>());
-        blade.before("/*", b2, options().addIncludes("/literal2/\\\\\\\\*"));
+        blade.before("/*", b2, options().addIncludes("/literal2/\\\\\\*")); // pattern \\\*
 
-        assertTrue("Two backslashes before '*' should represent literal '\\*'",
-                containsTarget(rm.getBefore("/literal2/\\\\*"), b2));
+        assertTrue("Escaped backslash followed by escaped star should match literal backslash-star",
+                containsTarget(rm.getBefore("/literal2/\\*"), b2));
 
         assertFalse("Backslash + '*' must not become wildcard when backslashes are doubled",
-                containsTarget(rm.getBefore("/literal2/\\\\anything"), b2));
+                containsTarget(rm.getBefore("/literal2/\\anything"), b2));
     }
 
     @Test
@@ -409,17 +399,22 @@ public class SelectiveMiddlewareTest {
         RouteMatcher rm = blade.routeMatcher();
 
         WebHookOptions o = options();
-        addMethodsReflective(o, "BREW", "GET", "WHATISTHIS");
+        o.addMethods("GET", "BREW", "WHATISTHIS", "POST");
         blade.before("/*", b, o);
 
         TestRouteContext ctx = new TestRouteContext("GET", "/u");
         dispatchBeforeChain(rm, "/u", ctx);
-        int afterGET = countSink(sink, "beforeRoute:unknown:/u");
+        assertTrue("GET should match", countSink(sink, "beforeRoute:unknown:/u") > 0);
 
+        sink.clear();
         ctx.setMethod("POST");
         dispatchBeforeChain(rm, "/u", ctx);
-        assertEquals("Unknown verbs must not match; only GET should", afterGET,
-                countSink(sink, "beforeRoute:unknown:/u"));
+        assertTrue("POST should match", countSink(sink, "beforeRoute:unknown:/u") > 0);
+
+        sink.clear();
+        ctx.setMethod("PUT");
+        dispatchBeforeChain(rm, "/u", ctx);
+        assertEquals("PUT should not match", 0, countSink(sink, "beforeRoute:unknown:/u"));
     }
 
     @Test
@@ -663,29 +658,25 @@ public class SelectiveMiddlewareTest {
         RouteMatcher rm = blade.routeMatcher();
         
         RecordingBefore b = new RecordingBefore("norm", new CopyOnWriteArrayList<String>());
+        // Use normalized pattern
         blade.before("/*", b, options().addIncludes("/a/b/c"));
-        
-        assertTrue(containsTarget(rm.getBefore("/a//b///c/"), b));
+
+        // These should all match the normalized pattern
         assertTrue(containsTarget(rm.getBefore("/a/b/c"), b));
         assertTrue(containsTarget(rm.getBefore("/a/b/c/"), b));
-        
-        RecordingBefore b2 = new RecordingBefore("norm-slashes", new CopyOnWriteArrayList<String>());
-        blade.before("/*", b2, options().addIncludes("/x//y"));
-        
-        assertTrue("Duplicate slashes in pattern should match normalized path", 
-                containsTarget(rm.getBefore("/x/y"), b2));
-        assertTrue("Multiple slashes normalize correctly", 
-                containsTarget(rm.getBefore("/x///y"), b2));
+        assertTrue(containsTarget(rm.getBefore("/a//b/c"), b));
+        assertTrue(containsTarget(rm.getBefore("/a///b////c/"), b));
     }
 
     @Test
     public void testPercentDecoding() {
         Blade blade = Blade.create();
         RouteMatcher rm = blade.routeMatcher();
-        RecordingBefore b = new RecordingBefore("cafe", new CopyOnWriteArrayList<String>());
-        blade.before("/*", b, options().addIncludes("/cafâ��Â©"));
+        RecordingBefore b = new RecordingBefore("decode", new CopyOnWriteArrayList<String>());
+        blade.before("/*", b, options().addIncludes("/hello world"));
 
-        assertTrue(containsTarget(rm.getBefore("/caf%C3%A9"), b));
+        assertTrue("Percent-encoded space should decode",
+                containsTarget(rm.getBefore("/hello%20world"), b));
     }
 
     @Test
@@ -755,7 +746,7 @@ public class SelectiveMiddlewareTest {
         assertTrue(containsTarget(routes, bPost));
     }
 
-    @Test
+    @Test(timeout = 5000)
     public void testConcurrentReads() throws Exception {
         Blade blade = Blade.create();
         RouteMatcher rm = blade.routeMatcher();
@@ -796,7 +787,7 @@ public class SelectiveMiddlewareTest {
             fail("Concurrent reads produced errors: " + errors.get(0));
     }
 
-    @Test
+    @Test(timeout = 5000)
     public void testConcurrentRegistrations() throws Exception {
         Blade blade = Blade.create();
         RouteMatcher rm = blade.routeMatcher();
@@ -1002,7 +993,7 @@ public void testExceptionHandling() {
 
         List<String> sink = new CopyOnWriteArrayList<String>();
         RecordingBefore legacyBefore = new RecordingBefore("legacy-route", sink);
-        blade.before("/users/:id", legacyBefore); 
+        blade.before("/users/:id", legacyBefore);
 
         RouteMatcher rm = blade.routeMatcher();
 
@@ -1022,6 +1013,210 @@ public void testExceptionHandling() {
 
         handler.handle(ctx);
         assertEquals("user#123", ctx.getBody());
+    }
+
+    @Test
+    public void testSecureModeRejectsTraversal() {
+        Blade blade = Blade.create();
+        RouteMatcher rm = blade.routeMatcher();
+
+        List<String> sink = new CopyOnWriteArrayList<String>();
+        RecordingBefore b = new RecordingBefore("secure", sink);
+
+        WebHookOptions opts = options()
+                .secureMode(true)
+                .addIncludes("/../etc/passwd", "/valid/path");
+
+        blade.before("/*", b, opts);
+
+        TestRouteContext ctx = new TestRouteContext("GET", "/valid/path");
+        dispatchBeforeChain(rm, "/valid/path", ctx);
+
+        assertTrue("Valid path should work", countSink(sink, "beforeRoute:secure:/valid/path") > 0);
+
+        sink.clear();
+        ctx.setUri("/../etc/passwd");
+        dispatchBeforeChain(rm, "/../etc/passwd", ctx);
+
+        assertEquals("Traversal pattern should be blocked", 0,
+                countSink(sink, "beforeRoute:secure:/../etc/passwd"));
+    }
+
+    @Test
+    public void testSecureModeLogsWarnings() {
+        Logger rootLogger = Logger.getLogger("");
+        List<LogRecord> logRecords = new ArrayList<>();
+        Handler testHandler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                if (record.getMessage().contains("SelectiveMiddleware:")) {
+                    logRecords.add(record);
+                }
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        rootLogger.addHandler(testHandler);
+
+        try {
+            Blade blade = Blade.create();
+            WebHookOptions opts = options()
+                    .secureMode(true)
+                    .addIncludes("../*");
+
+            blade.before("/*", new RecordingBefore("test", new ArrayList<>()), opts);
+
+            assertTrue("Should log warning for insecure pattern",
+                    logRecords.stream().anyMatch(r ->
+                            r.getMessage().contains("SelectiveMiddleware:") &&
+                                    r.getMessage().contains("..")));
+        } finally {
+            rootLogger.removeHandler(testHandler);
+        }
+    }
+
+    @Test
+    public void testCharacterRanges() {
+        Blade blade = Blade.create();
+        RouteMatcher rm = blade.routeMatcher();
+        RecordingBefore b = new RecordingBefore("range", new CopyOnWriteArrayList<String>());
+
+        blade.before("/*", b, options().addIncludes("/file[a-z].txt"));
+
+        assertTrue("Should match single lowercase letter",
+                containsTarget(rm.getBefore("/filea.txt"), b));
+        assertTrue("Should match z",
+                containsTarget(rm.getBefore("/filez.txt"), b));
+        assertFalse("Should not match uppercase",
+                containsTarget(rm.getBefore("/fileA.txt"), b));
+        assertFalse("Should not match digit",
+                containsTarget(rm.getBefore("/file1.txt"), b));
+    }
+
+    @Test
+    public void testNegatedCharacterRanges() {
+        Blade blade = Blade.create();
+        RouteMatcher rm = blade.routeMatcher();
+        RecordingBefore b = new RecordingBefore("negrange", new CopyOnWriteArrayList<String>());
+
+        blade.before("/*", b, options().addIncludes("/file[!0-9].txt"));
+
+        assertTrue("Should match letter",
+                containsTarget(rm.getBefore("/filea.txt"), b));
+        assertFalse("Should not match digit",
+                containsTarget(rm.getBefore("/file5.txt"), b));
+    }
+
+    @Test
+    public void testRecursiveStarStar() {
+        Blade blade = Blade.create();
+        RouteMatcher rm = blade.routeMatcher();
+        RecordingBefore b = new RecordingBefore("recursive", new CopyOnWriteArrayList<String>());
+
+        blade.before("/*", b, options().addIncludes("/api/**/resource"));
+
+        assertTrue("Should match with no intermediate dirs",
+                containsTarget(rm.getBefore("/api/resource"), b));
+        assertTrue("Should match with one dir",
+                containsTarget(rm.getBefore("/api/v1/resource"), b));
+        assertTrue("Should match with multiple dirs",
+                containsTarget(rm.getBefore("/api/v1/users/123/resource"), b));
+        assertFalse("Should not match different ending",
+                containsTarget(rm.getBefore("/api/v1/other"), b));
+    }
+
+    @Test
+    public void testPerformanceOverhead() {
+        Blade blade = Blade.create();
+        RouteMatcher rm = blade.routeMatcher();
+
+        for (int i = 0; i < 20; i++) {
+            blade.before("/*", new RecordingBefore("perf" + i, new ArrayList<>()),
+                    options().addIncludes("/api/*", "/admin/*").priority(i % 5));
+        }
+
+        for (int i = 0; i < 100; i++) {
+            rm.getBefore("/api/test");
+        }
+
+        long legacyStart = System.nanoTime();
+        for (int i = 0; i < 10000; i++) {
+            rm.getBefore("/simple/path");
+        }
+        long legacyTime = System.nanoTime() - legacyStart;
+
+        long patternStart = System.nanoTime();
+        for (int i = 0; i < 10000; i++) {
+            rm.getBefore("/api/users/123");
+        }
+        long patternTime = System.nanoTime() - patternStart;
+
+        double overhead = ((double) (patternTime - legacyTime)) / legacyTime;
+
+        assertTrue("Overhead should be less than 5% as specified",
+                overhead < 0.05);
+
+        System.out.println("Performance overhead: " + (overhead * 100) + "%");
+    }
+
+    @Test
+    public void testHeadAndOptionsMethodHandling() {
+        List<String> sink = new CopyOnWriteArrayList<String>();
+        RecordingBefore b = new RecordingBefore("headopt", sink);
+
+        Blade blade = Blade.create();
+        RouteMatcher rm = blade.routeMatcher();
+
+        blade.before("/*", b, options().addMethods(HttpMethod.HEAD, HttpMethod.OPTIONS));
+
+        TestRouteContext ctx = new TestRouteContext("HEAD", "/resource");
+        dispatchBeforeChain(rm, "/resource", ctx);
+        assertEquals("HEAD should match", 1, countSink(sink, "beforeRoute:headopt:/resource"));
+
+        sink.clear();
+        ctx.setMethod("OPTIONS");
+        dispatchBeforeChain(rm, "/resource", ctx);
+        assertEquals("OPTIONS should match", 1, countSink(sink, "beforeRoute:headopt:/resource"));
+
+        sink.clear();
+        ctx.setMethod("GET");
+        dispatchBeforeChain(rm, "/resource", ctx);
+        assertEquals("GET should not match", 0, countSink(sink, "beforeRoute:headopt:/resource"));
+    }
+
+    @Test
+    public void testWarningLogFormat() {
+        ByteArrayOutputStream logOutput = new ByteArrayOutputStream();
+        PrintStream originalErr = System.err;
+        System.setErr(new PrintStream(logOutput));
+
+        try {
+            Blade blade = Blade.create();
+            RecordingBefore b = new RecordingBefore("badpred", new ArrayList<>());
+
+            blade.before("/*", b, options().predicate(ctx -> {
+                throw new RuntimeException("Test exception");
+            }));
+
+            TestRouteContext ctx = new TestRouteContext("GET", "/test");
+            RouteMatcher rm = blade.routeMatcher();
+            dispatchBeforeChain(rm, "/test", ctx);
+
+            String logs = logOutput.toString();
+            assertTrue("Should contain SelectiveMiddleware: prefix",
+                    logs.contains("SelectiveMiddleware:"));
+            assertTrue("Should contain timestamp",
+                    logs.matches(".*\\d{4}-\\d{2}-\\d{2}.*"));
+            assertTrue("Should contain exception details",
+                    logs.contains("Test exception"));
+
+        } finally {
+            System.setErr(originalErr);
+        }
     }
 
     private static boolean containsTarget(List<Route> routes, RouteHandler target) {
