@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.hellokaton.blade.BladeTest
+-------------------------------------------------------------------------------
+Tests run: 22, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 8.873 sec - in com.hellokaton.blade.BladeTest

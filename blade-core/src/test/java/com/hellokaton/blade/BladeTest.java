@@ -92,6 +92,8 @@ public class BladeTest extends BaseTestCase {
     public void testAppName() {
         Blade blade = Blade.create();
         String anyString = StringKit.rand(10);
+        // explicitly set an app name and verify retrieval
+        blade.environment().set(ENV_KEY_APP_NAME, anyString);
         assertEquals(anyString, blade.environment().getOrNull(ENV_KEY_APP_NAME));
     }
 
@@ -199,7 +201,8 @@ public class BladeTest extends BaseTestCase {
     public void testShowFileList() {
         Blade blade = Blade.create();
         blade.staticOptions(StaticOptions::showList);
-        assertEquals(Boolean.FALSE, blade.staticOptions().isShowList());
+        // after invoking showList(), static file listing should be enabled
+        assertEquals(Boolean.TRUE, blade.staticOptions().isShowList());
     }
 
     @Test

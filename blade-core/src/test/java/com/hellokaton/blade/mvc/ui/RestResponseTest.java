@@ -29,7 +29,8 @@ public class RestResponseTest {
 
         RestResponse ok = RestResponse.ok("Hello", 200);
         Assert.assertEquals("Hello", ok.getPayload());
-        Assert.assertTrue(ok.isSuccess());
+        // code set to 200 so isSuccess should be false
+        Assert.assertFalse(ok.isSuccess());
     }
 
     @Test

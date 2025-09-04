@@ -67,6 +67,7 @@ public class Route {
 
     public Route() {
         this.sort = Integer.MAX_VALUE;
+        this.pathParams = Collections.emptyMap();
     }
 
     public Route(HttpMethod httpMethod, String path, Class<?> targetType, Method action) {

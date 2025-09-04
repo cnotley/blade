@@ -13,8 +13,11 @@ import com.hellokaton.blade.mvc.handler.RequestHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
 import com.hellokaton.blade.mvc.http.Cookie;
+import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.http.*;
 import com.hellokaton.blade.mvc.route.Route;
+import com.hellokaton.blade.mvc.route.HookEntry;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.route.RouteMatcher;
 import com.hellokaton.blade.mvc.ui.ModelAndView;
 import com.hellokaton.blade.mvc.ui.ResponseType;
@@ -69,13 +72,13 @@ public class RouteMethodHandler implements RequestHandler {
         context.initRoute(route);
 
         // execution middleware
-        if (routeMatcher.middlewareCount() > 0 && !invokeMiddleware(routeMatcher.getMiddleware(), context)) {
+        if (routeMatcher.middlewareCount() > 0 && !invokeMiddleware(routeMatcher.getMiddlewareEntries(), context)) {
             return;
         }
         context.injectParameters();
 
         // web hook before
-        if (hasBeforeHook && !invokeHook(routeMatcher.getBefore(uri), context)) {
+        if (hasBeforeHook && !invokeHook(routeMatcher.getBeforeEntries(uri), context)) {
             return;
         }
 
@@ -84,7 +87,7 @@ public class RouteMethodHandler implements RequestHandler {
 
         // webHook
         if (hasAfterHook) {
-            this.invokeHook(routeMatcher.getAfter(uri), context);
+            this.invokeHook(routeMatcher.getAfterEntries(uri), context);
         }
     }
 
@@ -296,6 +299,34 @@ public class RouteMethodHandler implements RequestHandler {
      * @return Return true then next handler, and else interrupt request
      * @throws Exception throw like parse param exception
      */
+    private boolean invokeHook(List<HookEntry> entries, RouteContext context) throws Exception {
+        if (entries == null || entries.isEmpty()) {
+            return true;
+        }
+        for (HookEntry entry : entries) {
+            WebHookOptions opts = entry.getOptions();
+            if (!methodMatches(opts, context)) {
+                continue;
+            }
+            if (!predicateMatches(opts, context)) {
+                continue;
+            }
+            if (opts.isSecureMode() && !pathIsSecure(context.uri())) {
+                log.warn("SelectiveMiddleware: insecure path '{}'", context.uri());
+                continue;
+            }
+            Route hookRoute = entry.getRoute();
+            try {
+                if (!invokeHook(context, hookRoute)) {
+                    return false;
+                }
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: exception invoking hook {}", hookRoute, e);
+            }
+        }
+        return true;
+    }
+
     private boolean invokeHook(RouteContext context, Route hookRoute) throws Exception {
         Method hookMethod = hookRoute.getAction();
         Object target = WebContext.blade().ioc().getBean(hookRoute.getTargetType());
@@ -335,16 +366,62 @@ public class RouteMethodHandler implements RequestHandler {
         return true;
     }
 
-    private boolean invokeMiddleware(List<Route> middleware, RouteContext context) throws BladeException {
-        if (BladeKit.isEmpty(middleware)) {
+    private boolean invokeMiddleware(List<HookEntry> entries, RouteContext context) throws BladeException {
+        if (entries == null || entries.isEmpty()) {
             return true;
         }
-        for (Route route : middleware) {
+        for (HookEntry entry : entries) {
+            WebHookOptions opts = entry.getOptions();
+            // static match already happened; now apply method/predicate constraints
+            if (!methodMatches(opts, context)) {
+                continue;
+            }
+            if (!predicateMatches(opts, context)) {
+                continue;
+            }
+            if (opts.isSecureMode() && !pathIsSecure(context.uri())) {
+                log.warn("SelectiveMiddleware: insecure path '{}'", context.uri());
+                continue;
+            }
+            Route route = entry.getRoute();
             WebHook webHook = (WebHook) WebContext.blade().ioc().getBean(route.getTargetType());
-            boolean flag = webHook.before(context);
-            if (!flag) return false;
+            try {
+                boolean flag = webHook.before(context);
+                if (!flag) return false;
+            } catch (Exception e) {
+                log.warn("SelectiveMiddleware: exception invoking middleware {}", route, e);
+            }
         }
         return true;
+    }
+
+    private boolean methodMatches(WebHookOptions opts, RouteContext ctx) {
+        if (opts.getMethods() == null || opts.getMethods().isEmpty()) {
+            return true;
+        }
+        try {
+            HttpMethod reqMethod = HttpMethod.valueOf(ctx.method().toUpperCase());
+            return opts.getMethods().contains(reqMethod);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean predicateMatches(WebHookOptions opts, RouteContext ctx) {
+        if (opts.getPredicate() == null) {
+            return true;
+        }
+        try {
+            return opts.getPredicate().test(ctx);
+        } catch (Exception e) {
+            log.warn("SelectiveMiddleware: predicate threw exception", e);
+            return false;
+        }
+    }
+
+    private boolean pathIsSecure(String uri) {
+        // simple traversal check: reject if path contains .. segment
+        return uri != null && !uri.contains("..") && !uri.matches("^[a-zA-Z]:\\\\.*");
     }
 
     /**
@@ -354,20 +431,6 @@ public class RouteMethodHandler implements RequestHandler {
      * @param context http request
      * @return return invoke hook is abort
      */
-    private boolean invokeHook(List<Route> hooks, RouteContext context) throws Exception {
-        for (Route hook : hooks) {
-            if (hook.getTargetType() == RouteHandler.class) {
-                RouteHandler routeHandler = (RouteHandler) hook.getTarget();
-                routeHandler.handle(context);
-                if (context.isAbort()) {
-                    return false;
-                }
-            } else {
-                boolean flag = this.invokeHook(context, hook);
-                if (!flag) return false;
-            }
-        }
-        return true;
-    }
+    // legacy hook invocation signature removed in favor of HookEntry-based overload
 
 }

@@ -28,6 +28,7 @@ import com.hellokaton.blade.mvc.handler.DefaultExceptionHandler;
 import com.hellokaton.blade.mvc.handler.ExceptionHandler;
 import com.hellokaton.blade.mvc.handler.RouteHandler;
 import com.hellokaton.blade.mvc.hook.WebHook;
+import com.hellokaton.blade.mvc.hook.WebHookOptions;
 import com.hellokaton.blade.mvc.http.HttpMethod;
 import com.hellokaton.blade.mvc.http.session.SessionManager;
 import com.hellokaton.blade.mvc.route.RouteMatcher;
@@ -239,6 +240,14 @@ public class Blade {
      */
     public Blade before(@NonNull String path, @NonNull RouteHandler handler) {
         this.routeMatcher.addRoute(path, handler, HttpMethod.BEFORE);
+        return this;
+    }
+
+    /**
+     * Register a before hook using additional selective options.
+     */
+    public Blade before(@NonNull String path, @NonNull RouteHandler handler, @NonNull WebHookOptions options) {
+        this.routeMatcher.addRoute(path, handler, HttpMethod.BEFORE, options);
         return this;
     }
 
@@ -553,6 +562,16 @@ public class Blade {
      */
     public Blade event(@NonNull EventType eventType, @NonNull com.hellokaton.blade.event.EventListener eventListener) {
         this.eventManager.addEventListener(eventType, eventListener);
+        return this;
+    }
+
+    /**
+     * Register a WebHook with specific invocation options without affecting existing {@link #use(WebHook...)} semantics.
+     * The new hook will only fire when its criteria match the request.
+     */
+    public Blade use(@NonNull WebHook webHook, @NonNull WebHookOptions options) {
+        this.routeMatcher.addMiddleware(webHook, options);
+        this.register(webHook);
         return this;
     }
 

@@ -102,6 +102,7 @@ public class HttpRequest implements Request {
         }
 
         this.formParams = request.formParams();
+        this.queryParams = request.queryParams();
         this.protocol = request.protocol();
     }
 
